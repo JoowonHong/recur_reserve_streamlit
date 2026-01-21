@@ -289,6 +289,21 @@ if 'expanded_group_id' not in st.session_state:
     st.session_state.expanded_group_id = None
 if 'selected_individual_reservations' not in st.session_state:
     st.session_state.selected_individual_reservations = {}
+# 추가 옵션 필드
+if 'city' not in st.session_state:
+    st.session_state.city = None
+if 'stadium' not in st.session_state:
+    st.session_state.stadium = None
+if 'equipment_type' not in st.session_state:
+    st.session_state.equipment_type = ""
+if 'equipment_name' not in st.session_state:
+    st.session_state.equipment_name = ""
+if 'is_paid' not in st.session_state:
+    st.session_state.is_paid = False
+if 'sport_type' not in st.session_state:
+    st.session_state.sport_type = None
+if 'content_title' not in st.session_state:
+    st.session_state.content_title = ""
 
 # 타이틀
 st.title("🎬 촬영 예약 시스템")
@@ -298,6 +313,83 @@ st.markdown("---")
 col1, col2 = st.columns([2, 1])
 
 with col1:
+    # 예약 정보 섹션
+    st.markdown("### 예약 정보")
+    
+    # 시군구 및 구장 선택
+    col_city, col_stadium = st.columns(2)
+    
+    with col_city:
+        st.markdown("**🏛️ 시군구**")
+        city = st.selectbox(
+            "시군구 선택",
+            options=["선택하세요", "서울시", "경기도", "인천시", "부산시", "대구시", "대전시", "광주시", "울산시"],
+            key="city_select",
+            label_visibility="collapsed"
+        )
+        st.session_state.city = city if city != "선택하세요" else None
+    
+    with col_stadium:
+        st.markdown("**⚽ 구장**")
+        stadium = st.selectbox(
+            "구장 선택",
+            options=["선택하세요", "구장A", "구장B", "구장C", "구장D"],
+            key="stadium_select",
+            label_visibility="collapsed"
+        )
+        st.session_state.stadium = stadium if stadium != "선택하세요" else None
+    
+    # 장비 정보
+    col_eq_type, col_eq_name = st.columns(2)
+    
+    with col_eq_type:
+        st.markdown("**🎥 장비타입**")
+        equipment_type = st.text_input(
+            "장비타입 입력",
+            value=st.session_state.equipment_type,
+            placeholder="예: 카메라, 드론, 조명 등",
+            key="equipment_type_input",
+            label_visibility="collapsed"
+        )
+        st.session_state.equipment_type = equipment_type
+    
+    with col_eq_name:
+        st.markdown("**📷 장비 이름**")
+        equipment_name = st.text_input(
+            "장비 이름 입력",
+            value=st.session_state.equipment_name,
+            placeholder="예: Sony A7S3, DJI Mini 3 Pro 등",
+            key="equipment_name_input",
+            label_visibility="collapsed"
+        )
+        st.session_state.equipment_name = equipment_name
+    
+    # 금액 및 종목
+    col_price, col_sport = st.columns(2)
+    
+    with col_price:
+        st.markdown("**💵 금액**")
+        price_option = st.radio(
+            "금액 선택",
+            options=["무료", "유료"],
+            horizontal=True,
+            key="price_option",
+            label_visibility="collapsed"
+        )
+        st.session_state.is_paid = (price_option == "유료")
+    
+    with col_sport:
+        st.markdown("**⚽ 종목선택**")
+        sport_type = st.selectbox(
+            "종목 선택",
+            options=["선택하세요", "축구", "농구", "배구", "야구", "테니스", "배드민턴", "기타"],
+            key="sport_select",
+            label_visibility="collapsed"
+        )
+        st.session_state.sport_type = sport_type if sport_type != "선택하세요" else None
+    
+    st.markdown("---")
+    
     # 예약 유형 선택
     st.markdown("### 예약유형")
     
