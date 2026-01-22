@@ -3,6 +3,20 @@ import pandas as pd
 from datetime import datetime, timedelta, time
 import sqlite3
 import json
+from reservation_handler import handle_reservation_confirm
+
+# 삭제 확인 다이얼로그
+@st.dialog("삭제 확인")
+def confirm_delete_dialog(message, on_confirm, **kwargs):
+    st.warning(f"⚠️ {message}")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ 확인", use_container_width=True, type="primary"):
+            on_confirm(**kwargs)
+            st.rerun()
+    with col2:
+        if st.button("❌ 취소", use_container_width=True):
+            st.rerun()
 
 # 데이터베이스 초기화
 def init_db():
@@ -58,10 +72,13 @@ def save_reservation(start_date, start_time, end_date, end_time, duration_minute
         str(end_time),
         duration_minutes
     ))
+    reservation_id = c.lastrowid
     conn.commit()
     conn.close()
+    return reservation_id
 
 # 예약 목록 조회 (일반예약만)
+@st.cache_data(ttl=1)
 def get_reservations():
     conn = sqlite3.connect('reservations.db')
     df = pd.read_sql_query(
@@ -72,6 +89,7 @@ def get_reservations():
     return df
 
 # 반복예약 그룹 목록 조회
+@st.cache_data(ttl=1)
 def get_repeat_groups():
     conn = sqlite3.connect('reservations.db')
     df = pd.read_sql_query("SELECT * FROM repeat_groups ORDER BY created_at DESC", conn)
@@ -79,6 +97,7 @@ def get_repeat_groups():
     return df
 
 # 특정 반복예약 그룹의 개별 예약 조회
+@st.cache_data(ttl=1)
 def get_reservations_by_group(group_id):
     conn = sqlite3.connect('reservations.db')
     df = pd.read_sql_query(
@@ -235,6 +254,12 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
     
     # 각 날짜별로 개별 예약 생성
     for date in dates:
+        # 종료 시간이 시작 시간보다 이전이면 다음날로 설정 (자정을 넘어가는 경우)
+        if end_time < start_time:
+            actual_end_date = date + timedelta(days=1)
+        else:
+            actual_end_date = date
+            
         c.execute('''
             INSERT INTO reservations 
             (reservation_type, start_date, start_time, end_date, end_time, 
@@ -244,7 +269,7 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
             "매주반복",
             str(date),
             str(start_time),
-            str(date),
+            str(actual_end_date),
             str(end_time),
             duration_minutes,
             group_id
@@ -252,7 +277,7 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
     
     conn.commit()
     conn.close()
-    return len(dates)
+    return group_id, len(dates)
 
 # 페이지 설정
 st.set_page_config(
@@ -260,6 +285,37 @@ st.set_page_config(
     page_icon="🎬",
     layout="wide"
 )
+
+# 다이얼로그 중앙 정렬 CSS
+st.markdown("""
+<style>
+/* 다이얼로그 오버레이 배경 - 완전히 제거 */
+div[data-testid="stModalBackdrop"] {
+    display: none !important;
+}
+
+/* 다이얼로그 컨테이너 - 여러 선택자 시도 */
+section[data-testid="stDialog"],
+div[data-testid="stDialog"],
+[data-testid="stDialog"] {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    margin: 0 !important;
+    max-height: 90vh !important;
+    z-index: 9999 !important;
+}
+
+/* Streamlit 다이얼로그 래퍼 */
+.stDialog {
+    position: fixed !important;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # 데이터베이스 초기화
 init_db()
@@ -310,345 +366,382 @@ st.title("🎬 촬영 예약 시스템")
 st.markdown("---")
 
 # 메인 컨텐츠
-col1, col2 = st.columns([2, 1])
 
-with col1:
-    # 예약 정보 섹션
-    st.markdown("### 예약 정보")
-    
-    # 시군구 및 구장 선택
-    col_city, col_stadium = st.columns(2)
-    
-    with col_city:
-        st.markdown("**🏛️ 시군구**")
-        city = st.selectbox(
-            "시군구 선택",
-            options=["선택하세요", "서울시", "경기도", "인천시", "부산시", "대구시", "대전시", "광주시", "울산시"],
-            key="city_select",
-            label_visibility="collapsed"
-        )
-        st.session_state.city = city if city != "선택하세요" else None
-    
-    with col_stadium:
-        st.markdown("**⚽ 구장**")
-        stadium = st.selectbox(
-            "구장 선택",
-            options=["선택하세요", "구장A", "구장B", "구장C", "구장D"],
-            key="stadium_select",
-            label_visibility="collapsed"
-        )
-        st.session_state.stadium = stadium if stadium != "선택하세요" else None
-    
-    # 장비 정보
-    col_eq_type, col_eq_name = st.columns(2)
-    
-    with col_eq_type:
-        st.markdown("**🎥 장비타입**")
-        equipment_type = st.text_input(
-            "장비타입 입력",
-            value=st.session_state.equipment_type,
-            placeholder="예: 카메라, 드론, 조명 등",
-            key="equipment_type_input",
-            label_visibility="collapsed"
-        )
-        st.session_state.equipment_type = equipment_type
-    
-    with col_eq_name:
-        st.markdown("**📷 장비 이름**")
-        equipment_name = st.text_input(
-            "장비 이름 입력",
-            value=st.session_state.equipment_name,
-            placeholder="예: Sony A7S3, DJI Mini 3 Pro 등",
-            key="equipment_name_input",
-            label_visibility="collapsed"
-        )
-        st.session_state.equipment_name = equipment_name
-    
-    # 금액 및 종목
-    col_price, col_sport = st.columns(2)
-    
-    with col_price:
-        st.markdown("**💵 금액**")
-        price_option = st.radio(
-            "금액 선택",
-            options=["무료", "유료"],
-            horizontal=True,
-            key="price_option",
-            label_visibility="collapsed"
-        )
-        st.session_state.is_paid = (price_option == "유료")
-    
-    with col_sport:
-        st.markdown("**⚽ 종목선택**")
-        sport_type = st.selectbox(
-            "종목 선택",
-            options=["선택하세요", "축구", "농구", "배구", "야구", "테니스", "배드민턴", "기타"],
-            key="sport_select",
-            label_visibility="collapsed"
-        )
-        st.session_state.sport_type = sport_type if sport_type != "선택하세요" else None
-    
-    st.markdown("---")
-    
-    # 예약 유형 선택
-    st.markdown("### 예약유형")
-    
-    # CSS로 왼쪽 정렬 적용
-    st.markdown("""
-    <style>
-    /* 라디오 버튼 왼쪽 정렬 */
-    div[data-testid="stRadio"] > div {
-        justify-content: flex-start !important;
-    }
-    /* 체크박스 왼쪽 정렬 */
-    div[data-testid="stCheckbox"] {
-        justify-content: flex-start !important;
-    }
-    /* 날짜 입력 왼쪽 정렬 */
-    div[data-testid="stDateInput"] > div {
-        justify-content: flex-start !important;
-    }
-    /* 시간 입력 왼쪽 정렬 */
-    div[data-testid="stTimeInput"] > div {
-        justify-content: flex-start !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
-    reservation_type = st.radio(
-        "예약 유형을 선택하세요",
-        options=["일반예약", "매주반복"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="reservation_type_radio"
+# 예약 정보 섹션
+st.markdown("### 예약 정보")
+
+# 시군구 및 구장 선택
+col_city, col_stadium = st.columns(2)
+
+with col_city:
+    st.markdown("**🏛️ 시군구**")
+    city = st.selectbox(
+        "시군구 선택",
+        options=["선택하세요", "서울시", "경기도", "인천시", "부산시", "대구시", "대전시", "광주시", "울산시","이동식 구장","기본"],
+        key="city_select",
+        label_visibility="collapsed"
     )
-    st.session_state.reservation_type = reservation_type
-    
-    # 매주반복 선택 시 요일 및 기간 선택
-    if reservation_type == "매주반복":
-        st.markdown("### 반복 요일 선택")
-        
-        # 요일 선택 버튼
-        days_of_week = ["월", "화", "수", "목", "금", "토", "일"]
-        cols_days = st.columns(7)
-        
-        selected_days = []
-        for idx, day in enumerate(days_of_week):
-            with cols_days[idx]:
-                if st.checkbox(day, key=f"day_{day}"):
-                    selected_days.append(day)
-        
-        st.session_state.selected_days = selected_days
-        
-        # 반복 기간 선택
-        st.markdown("### 반복 기간")
-        min_date = datetime.now().date()
-        max_date = min_date + timedelta(days=90)
-        
-        col_repeat1, col_repeat_sep, col_repeat2 = st.columns([1, 0.2, 1])
-        
-        with col_repeat1:
-            repeat_start_date = st.date_input(
-                "반복 시작 날짜",
-                min_value=min_date,
-                max_value=max_date,
-                value=min_date,
-                key="repeat_start_date_input",
-                label_visibility="collapsed"
-            )
-            st.session_state.repeat_start_date = repeat_start_date
-        
-        with col_repeat_sep:
-            st.markdown("<h4 style='text-align: left; padding-top: 8px;'>~</h4>", unsafe_allow_html=True)
-        
-        with col_repeat2:
-            repeat_end_date = st.date_input(
-                "반복 종료 날짜",
-                min_value=repeat_start_date if repeat_start_date else min_date,
-                max_value=max_date,
-                value=repeat_start_date if repeat_start_date else min_date,
-                key="repeat_end_date_input",
-                label_visibility="collapsed"
-            )
-            st.session_state.repeat_end_date = repeat_end_date
-    
-    st.markdown("---")
-    
-    st.header("📅 촬영 일시 선택")
-    
-    # 날짜 선택 (오늘부터 90일 후까지)
+    st.session_state.city = city if city != "선택하세요" else None
+
+with col_stadium:
+    st.markdown("**🏟️ 구장**")
+    stadium = st.selectbox(
+        "구장 선택",
+        options=["선택하세요", "구장A", "구장B", "구장C", "구장D"],
+        key="stadium_select",
+        label_visibility="collapsed"
+    )
+    st.session_state.stadium = stadium if stadium != "선택하세요" else None
+
+# 장비 정보
+col_eq_type, col_eq_name = st.columns(2)
+
+with col_eq_type:
+    st.markdown("**🎥 장비타입**")
+    equipment_type = st.text_input(
+        "장비타입 입력",
+        value=st.session_state.equipment_type,
+        # placeholder="예: 카메라, 드론, 조명 등",
+        key="equipment_type_input",
+        label_visibility="collapsed"
+    )
+    st.session_state.equipment_type = equipment_type
+
+with col_eq_name:
+    st.markdown("**📷 장비 이름**")
+    equipment_name = st.text_input(
+        "장비 이름 입력",
+        value=st.session_state.equipment_name,
+        # placeholder="예: Sony A7S3, DJI Mini 3 Pro 등",
+        key="equipment_name_input",
+        label_visibility="collapsed"
+    )
+    st.session_state.equipment_name = equipment_name
+
+# # 금액 및 종목
+# col_price, col_sport = st.columns(2)
+
+
+
+
+# with col_sport:
+#     st.markdown("**⚽ 종목선택**")
+#     sport_type = st.selectbox(
+#         "종목 선택",
+#         options=["선택하세요", "축구", "농구", "배구", "야구", "테니스", "배드민턴", "핸드볼"],
+#         key="sport_select",
+#         label_visibility="collapsed"
+#     )
+#     st.session_state.sport_type = sport_type if sport_type != "선택하세요" else None
+
+# st.markdown("---")
+
+# 장비 정보
+
+
+# 예약 유형 선택
+st.markdown("**📅 예약일자**")
+# CSS로 왼쪽 정렬 적용
+st.markdown("""
+<style>
+/* 라디오 버튼 왼쪽 정렬 */
+div[data-testid="stRadio"] > div {
+    justify-content: flex-start !important;
+}
+/* 체크박스 왼쪽 정렬 */
+div[data-testid="stCheckbox"] {
+    justify-content: flex-start !important;
+}
+/* 날짜 입력 왼쪽 정렬 */
+div[data-testid="stDateInput"] > div {
+    justify-content: flex-start !important;
+}
+/* 시간 입력 왼쪽 정렬 */
+div[data-testid="stTimeInput"] > div {
+    justify-content: flex-start !important;
+}
+</style>
+""", unsafe_allow_html=True)
+reservation_type = st.radio(
+    "예약 유형을 선택하세요",
+    options=["일반예약", "매주반복"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="reservation_type_radio"
+)
+st.session_state.reservation_type = reservation_type
+# 매주반복 선택 시 요일 및 기간 선택
+if reservation_type == "매주반복":
+    # st.markdown("**🔄 반복 요일 선택**")
+    # 요일 선택 버튼
+    days_of_week = ["월", "화", "수", "목", "금", "토", "일"]
+    cols_days = st.columns(7)
+    selected_days = []
+    for idx, day in enumerate(days_of_week):
+        with cols_days[idx]:
+            if st.checkbox(day, key=f"day_{day}"):
+                selected_days.append(day)
+    st.session_state.selected_days = selected_days
+    # 반복 기간 선택
+    # st.markdown("**🔄 반복 기간**")
     min_date = datetime.now().date()
     max_date = min_date + timedelta(days=90)
-    
-    # 현재 시간 기반 기본값
-    current_time = get_current_time()
-    
-    # 매주반복 선택 여부
-    is_repeat = (reservation_type == "매주반복")
-    
-    # 5개 컬럼으로 수평 배치 (동일한 너비로 설정)
-    col1_1, col1_2, col_separator, col1_3, col1_4 = st.columns([4, 3, 0.6, 4, 3])
-    
-    with col1_1:
-        st.markdown("**📅 시작 날짜**")
-        if is_repeat:
-            # 매주반복일 때는 비활성화
-            st.text_input(
-                "촬영 시작 날짜",
-                value="0000-00-00",
-                disabled=True,
-                key="start_date_disabled",
-                label_visibility="collapsed"
-            )
-            start_date = min_date  # 내부 계산용
-        else:
-            start_date = st.date_input(
-                "촬영 시작 날짜",
-                min_value=min_date,
-                max_value=max_date,
-                value=min_date,
-                key="start_date_input",
-                label_visibility="collapsed"
-            )
-        st.session_state.start_date = start_date
-    
-    with col1_2:
-        st.markdown("**⏰ 시작 시간**")
-        start_time = st.time_input(
-            "촬영 시작 시간",
-            value=current_time,
-            key="start_time_input",
-            label_visibility="collapsed",
-            step=60  # 1분 단위
+    col_repeat1, col_repeat_sep, col_repeat2 = st.columns([1, 0.2, 1])
+    with col_repeat1:
+        # 세션 상태 값이 있으면 그것을 사용, 없으면 기본값
+        repeat_start_value = st.session_state.repeat_start_date if st.session_state.repeat_start_date else min_date
+        repeat_start_date = st.date_input(
+            "반복 시작 날짜",
+            min_value=min_date,
+            max_value=max_date,
+            value=repeat_start_value,
+            key="repeat_start_date_input",
+            label_visibility="collapsed"
         )
-        st.session_state.start_time = start_time
-    
-    # 시작 시간 + 3시간 계산
-    default_end_date, default_end_time = calculate_end_datetime(start_date, start_time, 3)
-    
-    with col_separator:
-        st.markdown("**&nbsp;**")  # 빈 공간
-        st.markdown("<h3 style='text-align: left; padding-top: 8px;'>~</h3>", unsafe_allow_html=True)
-    
-    with col1_3:
-        st.markdown("**📅 종료 날짜**")
-        if is_repeat:
-            # 매주반복일 때는 비활성화
-            st.text_input(
-                "촬영 종료 날짜",
-                value="0000-00-00",
-                disabled=True,
-                key="end_date_disabled",
-                label_visibility="collapsed"
-            )
-            end_date = default_end_date  # 내부 계산용
-        else:
-            # 시작 날짜 이후만 선택 가능
-            end_date = st.date_input(
-                "촬영 종료 날짜",
-                min_value=start_date if start_date else min_date,
-                max_value=max_date,
-                value=default_end_date,
-                key="end_date_input",
-                label_visibility="collapsed"
-            )
-        st.session_state.end_date = end_date
-    
-    with col1_4:
-        st.markdown("**⏰ 종료 시간**")
-        end_time = st.time_input(
-            "촬영 종료 시간",
-            value=default_end_time,
-            key="end_time_input",
-            label_visibility="collapsed",
-            step=60  # 1분 단위
+        st.session_state.repeat_start_date = repeat_start_date
+    with col_repeat_sep:
+        st.markdown("<h4 style='text-align: center; padding-top: 8px;'>~</h4>", unsafe_allow_html=True)
+    with col_repeat2:
+        # 세션 상태 값이 있으면 그것을 사용, 없으면 시작 날짜
+        repeat_end_value = st.session_state.repeat_end_date if st.session_state.repeat_end_date else (repeat_start_date if repeat_start_date else min_date)
+        repeat_end_date = st.date_input(
+            "반복 종료 날짜",
+            min_value=repeat_start_date if repeat_start_date else min_date,
+            max_value=max_date,
+            value=repeat_end_value,
+            key="repeat_end_date_input",
+            label_visibility="collapsed"
         )
-        st.session_state.end_time = end_time
+        st.session_state.repeat_end_date = repeat_end_date
+
+    # st.markdown("---")
+
+    # st.markdown("### 촬영 시간")
+    # st.markdown📅 촬영 일시 선택")
+
+# 날짜 선택 (오늘부터 90일 후까지)
+min_date = datetime.now().date()
+max_date = min_date + timedelta(days=90)
+# 현재 시간 기반 기본값
+current_time = get_current_time()
+# 매주반복 선택 여부
+is_repeat = (reservation_type == "매주반복")
+# 5개 컬럼으로 수평 배치 (동일한 너비로 설정)
+col1_1, col1_2, col_separator, col1_3, col1_4 = st.columns([4, 3, 0.6, 4, 3])
+with col1_1:
+    # st.markdown("**📅 시작 날짜**")
+    if is_repeat:
+        # 매주반복일 때는 비활성화
+        st.text_input(
+            "촬영 시작 날짜",
+            value="0000/00/00",
+            disabled=True,
+            key="start_date_disabled",
+            label_visibility="collapsed"
+        )
+        start_date = min_date  # 내부 계산용
+    else:
+        start_date = st.date_input(
+            "촬영 시작 날짜",
+            min_value=min_date,
+            max_value=max_date,
+            value=min_date,
+            key="start_date_input",
+            label_visibility="collapsed"
+        )
+    st.session_state.start_date = start_date
+with col1_2:
+    # st.markdown("**⏰ 시작 시간**")
+    start_time = st.time_input(
+        "촬영 시작 시간",
+        value=current_time,
+        key="start_time_input",
+        label_visibility="collapsed",
+        step=60  # 1분 단위
+    )
     
-    # 종료 시간 유효성 검사
-    if start_date and start_time and end_date and end_time:
-        start_datetime = datetime.combine(start_date, start_time)
-        end_datetime = datetime.combine(end_date, end_time)
-        
-        if end_datetime <= start_datetime:
-            st.warning("⚠️ 종료 일시가 시작 일시보다 늦어야 합니다.")
+    # 시작 시간이 변경되었는지 확인하고 즉시 종료 시간 업데이트
+    if 'prev_start_time' not in st.session_state:
+        st.session_state.prev_start_time = start_time
+        st.session_state.end_time_key = 0
     
-    # 촬영 시간 계산 및 표시
-    if st.session_state.start_date and st.session_state.start_time and st.session_state.end_date and st.session_state.end_time:
-        start_datetime = datetime.combine(st.session_state.start_date, st.session_state.start_time)
-        end_datetime = datetime.combine(st.session_state.end_date, st.session_state.end_time)
+    if st.session_state.prev_start_time != start_time:
+        st.session_state.prev_start_time = start_time
+        # 종료 시간을 자동으로 계산하여 세션에 저장
+        new_end_date, new_end_time = calculate_end_datetime(start_date, start_time, 3)
+        st.session_state.end_time = new_end_time
+        st.session_state.end_date = new_end_date
+        # 위젯 키 증가하여 새 위젯 생성
+        st.session_state.end_time_key += 1
+        st.rerun()
+    
+    st.session_state.start_time = start_time
+# 시작 시간 + 3시간 계산
+default_end_date, default_end_time = calculate_end_datetime(start_date, start_time, 3)
+with col_separator:
+    st.markdown("<div style='display: flex; align-items: center; justify-content: center; height: 100%;'><h3 style='text-align: center; margin: 0; padding-top: 12px;'>~</h3></div>", unsafe_allow_html=True)
+with col1_3:
+    # st.markdown("**📅 종료 날짜**")
+    if is_repeat:
+        # 매주반복일 때는 비활성화
+        st.text_input(
+            "촬영 종료 날짜",
+            value="0000/00/00",
+            disabled=True,
+            key="end_date_disabled",
+            label_visibility="collapsed"
+        )
+        end_date = default_end_date  # 내부 계산용
+    else:
+        # 시작 날짜 이후만 선택 가능
+        end_date = st.date_input(
+            "촬영 종료 날짜",
+            min_value=start_date if start_date else min_date,
+            max_value=max_date,
+            value=default_end_date,
+            key="end_date_input",
+            label_visibility="collapsed"
+        )
+    st.session_state.end_date = end_date
+with col1_4:
+    # st.markdown("**⏰ 종료 시간**")
+    # 동적 키를 사용하여 시작 시간 변경 시 위젯 재생성
+    end_time_key = f"end_time_input_{st.session_state.get('end_time_key', 0)}"
+    
+    end_time = st.time_input(
+        "촬영 종료 시간",
+        value=st.session_state.end_time,
+        key=end_time_key,
+        label_visibility="collapsed",
+        step=60  # 1분 단위
+    )
+    st.session_state.end_time = end_time
+# 종료 시간 유효성 검사 (자정을 넘어가는 경우 고려)
+if start_date and start_time and end_date and end_time:
+    start_datetime = datetime.combine(start_date, start_time)
+    end_datetime = datetime.combine(end_date, end_time)
+    
+    # 매주반복일 때는 종료 시간이 시작 시간보다 이전이면 다음날로 간주
+    if is_repeat and end_time < start_time:
+        # 자정을 넘어가는 경우로 간주하여 시작 날짜 기준 다음날로 설정
+        end_datetime = datetime.combine(start_date + timedelta(days=1), end_time)
+    elif end_datetime <= start_datetime:
+        st.warning("⚠️ 종료 일시가 시작 일시보다 늦어야 합니다.")
+# 촬영 시간 계산 및 표시
+if st.session_state.start_date and st.session_state.start_time and st.session_state.end_date and st.session_state.end_time:
+    start_datetime = datetime.combine(st.session_state.start_date, st.session_state.start_time)
+    end_datetime = datetime.combine(st.session_state.end_date, st.session_state.end_time)
+    
+    # 매주반복일 때 종료 시간이 시작 시간보다 이전이면 다음날로 간주
+    if is_repeat and st.session_state.end_time < st.session_state.start_time:
+        # 시작 날짜 기준으로 다음날로 설정
+        end_datetime = datetime.combine(st.session_state.start_date + timedelta(days=1), st.session_state.end_time)
+    
+    duration = end_datetime - start_datetime
+    total_minutes = int(duration.total_seconds() / 60)
+    if total_minutes > 0:
+        days = total_minutes // (24 * 60)
+        remaining_minutes = total_minutes % (24 * 60)
+        hours = remaining_minutes // 60
+        minutes = remaining_minutes % 60
+        duration_str = ""
+        if days > 0:
+            duration_str += f"{days}일 "
+        if hours > 0:
+            duration_str += f"{hours}시간 "
+        if minutes > 0:
+            duration_str += f"{minutes}분"
+        st.info(f"⏱️ 총 촬영 시간: {duration_str.strip()}")
+    else:
+        st.error("⚠️ 종료 일시가 시작 일시보다 이전입니다. 다시 선택해주세요.")
+
+# 금액
+st.markdown("**💵 금액**")
+price_option = st.radio(
+    "금액 선택",
+    options=["무료", "유료"],
+    horizontal=True,
+    key="price_option",
+    label_visibility="collapsed"
+)
+st.session_state.is_paid = (price_option == "유료")
+st.markdown("---")
+
+st.header("📋 촬영 예약 요약")
+
+# 매주반복인 경우
+if st.session_state.reservation_type == "매주반복":
+    if (st.session_state.selected_days and st.session_state.repeat_start_date and 
+        st.session_state.repeat_end_date and st.session_state.start_time and st.session_state.end_time):
         
-        duration = end_datetime - start_datetime
+        # 시간 계산
+        start_time_obj = st.session_state.start_time
+        end_time_obj = st.session_state.end_time
+        
+        # 임시 날짜로 duration 계산
+        temp_start = datetime.combine(datetime.now().date(), start_time_obj)
+        temp_end = datetime.combine(datetime.now().date(), end_time_obj)
+        
+        # 종료 시간이 시작 시간보다 이전이면 다음날로 간주 (자정을 넘어가는 경우)
+        if end_time_obj < start_time_obj:
+            temp_end = datetime.combine(datetime.now().date() + timedelta(days=1), end_time_obj)
+        
+        duration = temp_end - temp_start
         total_minutes = int(duration.total_seconds() / 60)
         
         if total_minutes > 0:
-            days = total_minutes // (24 * 60)
-            remaining_minutes = total_minutes % (24 * 60)
-            hours = remaining_minutes // 60
-            minutes = remaining_minutes % 60
+            hours = total_minutes // 60
+            minutes = total_minutes % 60
             
-            duration_str = ""
-            if days > 0:
-                duration_str += f"{days}일 "
-            if hours > 0:
-                duration_str += f"{hours}시간 "
-            if minutes > 0:
-                duration_str += f"{minutes}분"
+            # 생성될 예약 개수 계산
+            repeat_dates = generate_repeat_dates(
+                st.session_state.repeat_start_date,
+                st.session_state.repeat_end_date,
+                st.session_state.selected_days
+            )
             
-            st.info(f"⏱️ 총 촬영 시간: {duration_str.strip()}")
-        else:
-            st.error("⚠️ 종료 일시가 시작 일시보다 이전입니다. 다시 선택해주세요.")
-
-with col2:
-    st.header("📋 촬영 예약 요약")
-    
-    # 매주반복인 경우
-    if st.session_state.reservation_type == "매주반복":
-        if (st.session_state.selected_days and st.session_state.repeat_start_date and 
-            st.session_state.repeat_end_date and st.session_state.start_time and st.session_state.end_time):
+            st.info(f"""
+            **선택하신 반복 예약 정보:**
             
-            # 시간 계산
-            start_time_obj = st.session_state.start_time
-            end_time_obj = st.session_state.end_time
+            🔄 **반복 요일:** {', '.join(st.session_state.selected_days)}
             
-            # 임시 날짜로 duration 계산
-            temp_start = datetime.combine(datetime.now().date(), start_time_obj)
-            temp_end = datetime.combine(datetime.now().date(), end_time_obj)
-            duration = temp_end - temp_start
-            total_minutes = int(duration.total_seconds() / 60)
+            📅 **반복 기간:** {st.session_state.repeat_start_date.strftime('%Y년 %m월 %d일')} ~ {st.session_state.repeat_end_date.strftime('%Y년 %m월 %d일')}
             
-            if total_minutes > 0:
-                hours = total_minutes // 60
-                minutes = total_minutes % 60
-                
-                # 생성될 예약 개수 계산
-                repeat_dates = generate_repeat_dates(
+            ⏰ **촬영 시간:** {start_time_obj.strftime('%H:%M')} ~ {end_time_obj.strftime('%H:%M')}
+            
+            ⏱️ **1회 촬영 시간:** {hours}시간 {minutes}분
+            
+            📊 **총 예약 횟수:** {len(repeat_dates)}회
+            """)
+            
+            st.markdown("---")
+            
+            # 예약 확인 버튼
+            if st.button("✅ 촬영 예약 확정", use_container_width=True, type="primary", key="confirm_repeat"):
+                # 예약 가능 여부 판단
+                check_dates = generate_repeat_dates(
                     st.session_state.repeat_start_date,
                     st.session_state.repeat_end_date,
                     st.session_state.selected_days
                 )
                 
-                st.info(f"""
-                **선택하신 반복 예약 정보:**
-                
-                🔄 **반복 요일:** {', '.join(st.session_state.selected_days)}
-                
-                📅 **반복 기간:** {st.session_state.repeat_start_date.strftime('%Y년 %m월 %d일')} ~ {st.session_state.repeat_end_date.strftime('%Y년 %m월 %d일')}
-                
-                ⏰ **촬영 시간:** {start_time_obj.strftime('%H:%M')} ~ {end_time_obj.strftime('%H:%M')}
-                
-                ⏱️ **1회 촬영 시간:** {hours}시간 {minutes}분
-                
-                📊 **총 예약 횟수:** {len(repeat_dates)}회
-                """)
-                
-                st.markdown("---")
-                
-                # 예약 확인 버튼
-                if st.button("✅ 촬영 예약 확정", use_container_width=True, type="primary", key="confirm_repeat"):
+                if len(check_dates) == 0:
+                    # 예약이 없는 경우 팝업
+                    @st.dialog("예약 불가")
+                    def no_reservation_dialog():
+                        st.error("⚠️ 해당하는 구간에 예약이 없습니다. 다시 설정해주세요.")
+                        st.markdown("""
+                        **확인사항:**
+                        - 선택한 요일이 반복 기간 내에 존재하는지 확인해주세요.
+                        - 반복 시작 날짜와 종료 날짜를 확인해주세요.
+                        """)
+                        if st.button("✅ 확인", use_container_width=True, type="primary"):
+                            st.rerun()
+                    no_reservation_dialog()
+                else:
+                    # 예약 진행
                     try:
-                        # 반복 예약 그룹 저장
-                        count = save_repeat_group(
+                        group_id, count = save_repeat_group(
                             selected_days=st.session_state.selected_days,
                             repeat_start_date=st.session_state.repeat_start_date,
                             repeat_end_date=st.session_state.repeat_end_date,
@@ -657,77 +750,83 @@ with col2:
                             duration_minutes=total_minutes
                         )
                         
+                        # 터미널에 데이터베이스 내용 출력
+                        handle_reservation_confirm(group_id=group_id)
+                        
                         st.success(f"✨ {count}개의 촬영 예약이 완료되었습니다!")
                         st.balloons()
                         st.rerun()
                     except Exception as e:
                         st.error(f"예약 저장 중 오류 발생: {str(e)}")
-            else:
-                st.error("⚠️ 종료 시간이 시작 시간보다 늦어야 합니다.")
         else:
-            st.warning("반복 요일, 반복 기간, 촬영 시간을 모두 선택해주세요.")
-    
-    # 일반예약인 경우
-    elif st.session_state.start_date and st.session_state.start_time and st.session_state.end_date and st.session_state.end_time:
-        # 촬영 시간 계산
-        start_datetime = datetime.combine(st.session_state.start_date, st.session_state.start_time)
-        end_datetime = datetime.combine(st.session_state.end_date, st.session_state.end_time)
-        
-        duration = end_datetime - start_datetime
-        total_minutes = int(duration.total_seconds() / 60)
-        
-        if total_minutes > 0:
-            days = total_minutes // (24 * 60)
-            remaining_minutes = total_minutes % (24 * 60)
-            hours = remaining_minutes // 60
-            minutes = remaining_minutes % 60
-            
-            duration_str = ""
-            if days > 0:
-                duration_str += f"{days}일 "
-            if hours > 0:
-                duration_str += f"{hours}시간 "
-            if minutes > 0:
-                duration_str += f"{minutes}분"
-            
-            st.info(f"""
-            **선택하신 촬영 예약 정보:**
-            
-            🎬 **촬영 시작**
-            📅 {st.session_state.start_date.strftime('%Y년 %m월 %d일')}
-            ⏰ {st.session_state.start_time.strftime('%H:%M')}
-            
-            🎬 **촬영 종료**
-            📅 {st.session_state.end_date.strftime('%Y년 %m월 %d일')}
-            ⏰ {st.session_state.end_time.strftime('%H:%M')}
-            
-            ⏱️ **총 촬영 시간:** {duration_str.strip()}
-            """)
-            
-            st.markdown("---")
-            
-            # 예약 확인 버튼
-            if st.button("✅ 촬영 예약 확정", use_container_width=True, type="primary", key="confirm_regular"):
-                try:
-                    # 일반예약 저장
-                    save_reservation(
-                        start_date=st.session_state.start_date,
-                        start_time=st.session_state.start_time,
-                        end_date=st.session_state.end_date,
-                        end_time=st.session_state.end_time,
-                        duration_minutes=total_minutes
-                    )
-                    
-                    st.success("✨ 촬영 예약이 완료되었습니다!")
-                    st.balloons()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"예약 저장 중 오류 발생: {str(e)}")
-        else:
-            st.error("⚠️ 종료 일시가 시작 일시보다 이전입니다.")
-    
+            st.error("⚠️ 종료 시간이 시작 시간보다 늦어야 합니다.")
     else:
-        st.warning("촬영 시작/종료 날짜와 시간을 모두 선택해주세요.")
+        st.warning("반복 요일, 반복 기간, 촬영 시간을 모두 선택해주세요.")
+
+# 일반예약인 경우
+elif st.session_state.start_date and st.session_state.start_time and st.session_state.end_date and st.session_state.end_time:
+    # 촬영 시간 계산
+    start_datetime = datetime.combine(st.session_state.start_date, st.session_state.start_time)
+    end_datetime = datetime.combine(st.session_state.end_date, st.session_state.end_time)
+    
+    duration = end_datetime - start_datetime
+    total_minutes = int(duration.total_seconds() / 60)
+    
+    if total_minutes > 0:
+        days = total_minutes // (24 * 60)
+        remaining_minutes = total_minutes % (24 * 60)
+        hours = remaining_minutes // 60
+        minutes = remaining_minutes % 60
+        
+        duration_str = ""
+        if days > 0:
+            duration_str += f"{days}일 "
+        if hours > 0:
+            duration_str += f"{hours}시간 "
+        if minutes > 0:
+            duration_str += f"{minutes}분"
+        
+        st.info(f"""
+        **선택하신 촬영 예약 정보:**
+        
+        🎬 **촬영 시작**
+        📅 {st.session_state.start_date.strftime('%Y년 %m월 %d일')}
+        ⏰ {st.session_state.start_time.strftime('%H:%M')}
+        
+        🎬 **촬영 종료**
+        📅 {st.session_state.end_date.strftime('%Y년 %m월 %d일')}
+        ⏰ {st.session_state.end_time.strftime('%H:%M')}
+        
+        ⏱️ **총 촬영 시간:** {duration_str.strip()}
+        """)
+        
+        # st.markdown("---")
+        
+        # 예약 확인 버튼
+        if st.button("✅ 촬영 예약 확정", use_container_width=True, type="primary", key="confirm_regular"):
+            try:
+                # 일반예약 저장
+                reservation_id = save_reservation(
+                    start_date=st.session_state.start_date,
+                    start_time=st.session_state.start_time,
+                    end_date=st.session_state.end_date,
+                    end_time=st.session_state.end_time,
+                    duration_minutes=total_minutes
+                )
+                
+                # 터미널에 데이터베이스 내용 출력
+                handle_reservation_confirm(reservation_id=reservation_id)
+                
+                st.success("✨ 촬영 예약이 완료되었습니다!")
+                st.balloons()
+                st.rerun()
+            except Exception as e:
+                st.error(f"예약 저장 중 오류 발생: {str(e)}")
+    else:
+        st.error("⚠️ 종료 일시가 시작 일시보다 이전입니다.")
+
+else:
+    st.warning("촬영 시작/종료 날짜와 시간을 모두 선택해주세요.")
 
 # 예약 내역 표시
 st.markdown("---")
@@ -817,22 +916,28 @@ if has_data:
                                 use_container_width=True,
                                 type="primary" if selected_count > 0 else "secondary"
                             ):
-                                # 선택된 예약들 삭제
-                                for res_id in selected_ids:
-                                    delete_individual_reservation(res_id, row['id'])
-                                    # 체크박스 상태 초기화
-                                    if f"check_ind_{res_id}_{row['id']}" in st.session_state:
-                                        del st.session_state[f"check_ind_{res_id}_{row['id']}"]
-                                
-                                # 남은 예약 확인
-                                remaining_reservations = get_reservations_by_group(row['id'])
-                                if not remaining_reservations.empty:
-                                    st.success(f"✨ {selected_count}개의 예약이 삭제되었습니다! (남은 예약: {len(remaining_reservations)}건)")
-                                else:
-                                    st.success("✨ 모든 예약이 삭제되어 그룹도 삭제되었습니다!")
-                                    st.session_state.expanded_group_id = None
-                                
-                                st.rerun()
+                                @st.dialog("삭제 확인")
+                                def confirm_dialog(count, ids, group_id):
+                                    st.warning(f"⚠️ {count}개의 예약을 삭제하시겠습니까?")
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_sel_yes"):
+                                            # 선택된 예약들 삭제
+                                            for res_id in ids:
+                                                delete_individual_reservation(res_id, group_id)
+                                                # 체크박스 상태 초기화
+                                                if f"check_ind_{res_id}_{group_id}" in st.session_state:
+                                                    del st.session_state[f"check_ind_{res_id}_{group_id}"]
+                                            
+                                            # 남은 예약 확인
+                                            remaining_reservations = get_reservations_by_group(group_id)
+                                            if remaining_reservations.empty:
+                                                st.session_state.expanded_group_id = None
+                                            st.rerun()
+                                    with col2:
+                                        if st.button("❌ 취소", use_container_width=True, key="conf_sel_no"):
+                                            st.rerun()
+                                confirm_dialog(selected_count, selected_ids, row['id'])
                         
                         st.markdown("---")
                         
@@ -842,37 +947,58 @@ if has_data:
                             
                             res_id = int(res['id'])
                             
+                            # 총 시간 계산
+                            duration_mins = res['duration_minutes']
+                            days = duration_mins // (24 * 60)
+                            remaining_mins = duration_mins % (24 * 60)
+                            hours = remaining_mins // 60
+                            minutes = remaining_mins % 60
+                            
+                            duration_str = ""
+                            if days > 0:
+                                duration_str += f"{days}일 "
+                            if hours > 0:
+                                duration_str += f"{hours}시간 "
+                            if minutes > 0:
+                                duration_str += f"{minutes}분"
+                            
+                            # 시작/종료 날짜 및 시간
+                            start_datetime = f"{res['start_date']} {res['start_time']}"
+                            end_datetime = f"{res['end_date']} {res['end_time']}"
+                            
                             with col_check:
                                 # 체크박스 - 세션 상태에 직접 저장
                                 st.checkbox(
-                                    "",
+                                    "Select reservation",
                                     value=False,
                                     key=f"check_ind_{res_id}_{row['id']}",
                                     label_visibility="collapsed"
                                 )
                             
                             with col_ind_info:
-                                st.markdown(f"""
-                                **{i+1}번째 예약**  
-                                📅 날짜: {res['start_date']}  
-                                ⏰ 시간: {res['start_time']} ~ {res['end_time']}
+                                st.info(f"""
+                                **[매주반복-개별]** ID: {res['id']}  
+                                🎬 **촬영 시간:** {start_datetime} ~ {end_datetime}  
+                                ⏱️ **총 시간:** {duration_str.strip()}  
+                                📅 **등록:** {res['created_at']}
                                 """)
                             
                             with col_ind_del:
                                 if st.button("🗑️", key=f"delete_ind_{res['id']}", help="이 예약만 삭제", use_container_width=True):
-                                    remaining = delete_individual_reservation(res['id'], row['id'])
-                                    
-                                    # 체크박스 상태 초기화
-                                    if f"check_ind_{res_id}_{row['id']}" in st.session_state:
-                                        del st.session_state[f"check_ind_{res_id}_{row['id']}"]
-                                    
-                                    if remaining > 0:
-                                        st.success(f"✨ 개별 예약이 삭제되었습니다! (남은 예약: {remaining}건)")
-                                    else:
-                                        st.success("✨ 마지막 예약이 삭제되어 그룹도 삭제되었습니다!")
-                                        st.session_state.expanded_group_id = None
-                                    
-                                    st.rerun()
+                                    @st.dialog("삭제 확인")
+                                    def confirm_ind_dialog(reservation_id, check_key):
+                                        st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_ind_yes"):
+                                                delete_individual_reservation(reservation_id, row['id'])
+                                                if check_key in st.session_state:
+                                                    del st.session_state[check_key]
+                                                st.rerun()
+                                        with col2:
+                                            if st.button("❌ 취소", use_container_width=True, key="conf_ind_no"):
+                                                st.rerun()
+                                    confirm_ind_dialog(res['id'], f"check_ind_{res_id}_{row['id']}")
                             
                             st.markdown("---")
                     else:
@@ -885,9 +1011,19 @@ if has_data:
             
             with col_delete:
                 if st.button("🗑️ 삭제", key=f"delete_group_{row['id']}", use_container_width=True):
-                    delete_repeat_group(row['id'])
-                    st.session_state.editing_group_id = None
-                    st.rerun()
+                    @st.dialog("삭제 확인")
+                    def confirm_group_dialog(group_id, total_count):
+                        st.warning(f"⚠️ 반복예약 그룹 ({total_count}개 예약)을 삭제하시겠습니까?")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_grp_yes"):
+                                delete_repeat_group(group_id)
+                                st.session_state.editing_group_id = None
+                                st.rerun()
+                        with col2:
+                            if st.button("❌ 취소", use_container_width=True, key="conf_grp_no"):
+                                st.rerun()
+                    confirm_group_dialog(row['id'], row['total_count'])
             
             # 수정 모드
             if st.session_state.editing_group_id == row['id']:
@@ -947,6 +1083,11 @@ if has_data:
                                     end_time=new_end_time,
                                     duration_minutes=new_total_minutes
                                 )
+                                
+                                # 터미널에 수정된 데이터베이스 내용 출력
+                                from reservation_handler import handle_reservation_confirm
+                                handle_reservation_confirm(group_id=row['id'])
+                                
                                 st.session_state.editing_group_id = None
                                 st.success("✨ 반복예약이 수정되었습니다!")
                                 st.rerun()
@@ -998,9 +1139,19 @@ if has_data:
             
             with col_delete:
                 if st.button("🗑️ 삭제", key=f"delete_{row['id']}", use_container_width=True):
-                    delete_reservation(row['id'])
-                    st.session_state.editing_reservation_id = None
-                    st.rerun()
+                    @st.dialog("삭제 확인")
+                    def confirm_res_dialog(reservation_id):
+                        st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_res_yes"):
+                                delete_reservation(reservation_id)
+                                st.session_state.editing_reservation_id = None
+                                st.rerun()
+                        with col2:
+                            if st.button("❌ 취소", use_container_width=True, key="conf_res_no"):
+                                st.rerun()
+                    confirm_res_dialog(row['id'])
             
             # 수정 모드
             if st.session_state.editing_reservation_id == row['id']:
@@ -1093,6 +1244,11 @@ if has_data:
                                     end_time=new_end_time,
                                     duration_minutes=new_total_minutes
                                 )
+                                
+                                # 터미널에 수정된 데이터베이스 내용 출력
+                                from reservation_handler import handle_reservation_confirm
+                                handle_reservation_confirm(reservation_id=row['id'])
+                                
                                 st.session_state.editing_reservation_id = None
                                 st.success("✨ 예약이 수정되었습니다!")
                                 st.rerun()
