@@ -33,7 +33,7 @@ def init_db():
             start_time TEXT NOT NULL,
             end_time TEXT NOT NULL,
             duration_minutes INTEGER,
-            total_count INTEGER,
+            reservation_ids TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -42,15 +42,12 @@ def init_db():
     c.execute('''
         CREATE TABLE IF NOT EXISTS reservations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            reservation_type TEXT NOT NULL,
             start_date TEXT NOT NULL,
             start_time TEXT NOT NULL,
             end_date TEXT NOT NULL,
             end_time TEXT NOT NULL,
             duration_minutes INTEGER,
-            repeat_group_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (repeat_group_id) REFERENCES repeat_groups(id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     conn.commit()
@@ -62,10 +59,9 @@ def save_reservation(start_date, start_time, end_date, end_time, duration_minute
     c = conn.cursor()
     c.execute('''
         INSERT INTO reservations 
-        (reservation_type, start_date, start_time, end_date, end_time, duration_minutes, repeat_group_id)
-        VALUES (?, ?, ?, ?, ?, ?, NULL)
+        (start_date, start_time, end_date, end_time, duration_minutes)
+        VALUES (?, ?, ?, ?, ?)
     ''', (
-        "일반예약",
         str(start_date),
         str(start_time),
         str(end_date),
@@ -77,12 +73,12 @@ def save_reservation(start_date, start_time, end_date, end_time, duration_minute
     conn.close()
     return reservation_id
 
-# 예약 목록 조회 (일반예약만)
+# 예약 목록 조회
 @st.cache_data(ttl=1)
 def get_reservations():
     conn = sqlite3.connect('reservations.db')
     df = pd.read_sql_query(
-        "SELECT * FROM reservations WHERE repeat_group_id IS NULL ORDER BY created_at DESC", 
+        "SELECT * FROM reservations ORDER BY created_at DESC", 
         conn
     )
     conn.close()
@@ -97,14 +93,38 @@ def get_repeat_groups():
     return df
 
 # 특정 반복예약 그룹의 개별 예약 조회
-@st.cache_data(ttl=1)
 def get_reservations_by_group(group_id):
+    print(f"\n📋 get_reservations_by_group 호출: group_id={group_id}")
     conn = sqlite3.connect('reservations.db')
-    df = pd.read_sql_query(
-        "SELECT * FROM reservations WHERE repeat_group_id = ? ORDER BY start_date, start_time", 
-        conn,
-        params=(group_id,)
-    )
+    c = conn.cursor()
+    
+    # repeat_groups에서 reservation_ids 가져오기
+    c.execute("SELECT reservation_ids FROM repeat_groups WHERE id = ?", (group_id,))
+    result = c.fetchone()
+    
+    print(f"   🔍 repeat_groups 조회 결과: {result}")
+    
+    if result and result[0]:
+        reservation_ids = json.loads(result[0])
+        print(f"   📝 reservation_ids: {reservation_ids}")
+        if reservation_ids:
+            placeholders = ','.join('?' * len(reservation_ids))
+            query = f"SELECT * FROM reservations WHERE id IN ({placeholders}) ORDER BY start_date, start_time"
+            print(f"   🔎 실행 쿼리: {query}")
+            print(f"   📊 파라미터: {reservation_ids}")
+            df = pd.read_sql_query(query, conn, params=reservation_ids)
+            print(f"   ✅ 조회 완료: {len(df)}건")
+        else:
+            print(f"   ⚠️ reservation_ids가 비어있음")
+            df = pd.DataFrame()
+    else:
+        print(f"   ⚠️ repeat_groups에서 group_id={group_id}를 찾을 수 없음")
+        # 존재하지 않는 그룹이면 세션 상태 정리
+        if 'expanded_group_id' in st.session_state and st.session_state.expanded_group_id == group_id:
+            print(f"   🧹 세션 상태 정리: expanded_group_id={group_id} 제거")
+            st.session_state.expanded_group_id = None
+        df = pd.DataFrame()
+    
     conn.close()
     return df
 
@@ -127,36 +147,85 @@ def update_reservation(reservation_id, start_date, start_time, end_date, end_tim
     conn.commit()
     conn.close()
 
-# 예약 삭제 (일반예약)
+# 예약 삭제 (일반예약 - repeat_groups 확인)
 def delete_reservation(reservation_id):
+    print(f"\n🔍 delete_reservation 호출: reservation_id={reservation_id}")
     conn = sqlite3.connect('reservations.db')
     c = conn.cursor()
+    
+    # 이 예약이 반복예약 그룹에 속하는지 확인
+    c.execute("SELECT id, reservation_ids FROM repeat_groups")
+    groups = c.fetchall()
+    
+    print(f"   📦 repeat_groups 검색: {len(groups)}개 그룹")
+    
+    for group_id, reservation_ids_json in groups:
+        if reservation_ids_json:
+            try:
+                reservation_ids = json.loads(reservation_ids_json)
+                print(f"   📋 그룹 {group_id}: {reservation_ids}")
+                if reservation_id in reservation_ids:
+                    # 반복예약 그룹의 일부라면 delete_individual_reservation 사용
+                    print(f"   ✅ 예약 {reservation_id}은 그룹 {group_id}에 속함 → delete_individual_reservation 호출")
+                    c.close()
+                    conn.close()
+                    delete_individual_reservation(reservation_id, group_id)
+                    return
+            except Exception as e:
+                print(f"   ⚠️ JSON 파싱 에러: {e}")
+                pass
+    
+    # 일반 예약이면 그냥 삭제
+    print(f"   ℹ️ 일반 예약 → 직접 삭제")
     c.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
     conn.commit()
     conn.close()
+    print(f"   ✅ 삭제 완료\n")
 
 # 개별 예약 삭제 (반복예약 그룹 내)
 def delete_individual_reservation(reservation_id, group_id):
-    """개별 예약 삭제 후 그룹의 total_count 업데이트"""
+    """개별 예약 삭제 후 그룹의 reservation_ids 업데이트"""
+    print(f"\n🗑️ delete_individual_reservation 호출: reservation_id={reservation_id}, group_id={group_id}")
+    
     conn = sqlite3.connect('reservations.db')
     c = conn.cursor()
     
     # 개별 예약 삭제
     c.execute("DELETE FROM reservations WHERE id = ?", (reservation_id,))
+    print(f"   ✅ reservations 테이블에서 id={reservation_id} 삭제")
     
-    # 그룹의 남은 개별 예약 개수 확인
-    c.execute("SELECT COUNT(*) FROM reservations WHERE repeat_group_id = ?", (group_id,))
-    remaining_count = c.fetchone()[0]
+    # 그룹의 reservation_ids에서 해당 ID 제거
+    c.execute("SELECT reservation_ids FROM repeat_groups WHERE id = ?", (group_id,))
+    result = c.fetchone()
     
-    if remaining_count > 0:
-        # 그룹의 total_count 업데이트
-        c.execute("UPDATE repeat_groups SET total_count = ? WHERE id = ?", (remaining_count, group_id))
+    if result and result[0]:
+        reservation_ids = json.loads(result[0])
+        print(f"   📋 기존 reservation_ids: {reservation_ids}")
+        
+        if reservation_id in reservation_ids:
+            reservation_ids.remove(reservation_id)
+            print(f"   ✂️ {reservation_id} 제거 후: {reservation_ids}")
+        
+        if reservation_ids:
+            # 남은 ID가 있으면 업데이트
+            c.execute(
+                "UPDATE repeat_groups SET reservation_ids = ? WHERE id = ?",
+                (json.dumps(reservation_ids), group_id)
+            )
+            print(f"   💾 repeat_groups 업데이트: reservation_ids={json.dumps(reservation_ids)}")
+            remaining_count = len(reservation_ids)
+        else:
+            # 모든 개별 예약이 삭제되면 그룹도 삭제
+            c.execute("DELETE FROM repeat_groups WHERE id = ?", (group_id,))
+            print(f"   🗑️ 모든 예약 삭제됨 - repeat_groups id={group_id} 삭제")
+            remaining_count = 0
     else:
-        # 모든 개별 예약이 삭제되면 그룹도 삭제
-        c.execute("DELETE FROM repeat_groups WHERE id = ?", (group_id,))
+        print(f"   ⚠️ repeat_groups에서 reservation_ids를 찾을 수 없음")
+        remaining_count = 0
     
     conn.commit()
     conn.close()
+    print(f"   ✅ 완료: 남은 예약 {remaining_count}개\n")
     return remaining_count
 
 # 반복예약 그룹 수정 (그룹과 관련된 모든 개별 예약의 시간도 수정)
@@ -171,12 +240,19 @@ def update_repeat_group(group_id, start_time, end_time, duration_minutes):
         WHERE id = ?
     ''', (str(start_time), str(end_time), duration_minutes, group_id))
     
-    # 관련된 모든 개별 예약의 시간도 업데이트
-    c.execute('''
-        UPDATE reservations 
-        SET start_time = ?, end_time = ?, duration_minutes = ?
-        WHERE repeat_group_id = ?
-    ''', (str(start_time), str(end_time), duration_minutes, group_id))
+    # reservation_ids에서 ID 목록 가져오기
+    c.execute("SELECT reservation_ids FROM repeat_groups WHERE id = ?", (group_id,))
+    result = c.fetchone()
+    
+    if result and result[0]:
+        reservation_ids = json.loads(result[0])
+        # 관련된 모든 개별 예약의 시간도 업데이트
+        for res_id in reservation_ids:
+            c.execute('''
+                UPDATE reservations 
+                SET start_time = ?, end_time = ?, duration_minutes = ?
+                WHERE id = ?
+            ''', (str(start_time), str(end_time), duration_minutes, res_id))
     
     conn.commit()
     conn.close()
@@ -185,8 +261,17 @@ def update_repeat_group(group_id, start_time, end_time, duration_minutes):
 def delete_repeat_group(group_id):
     conn = sqlite3.connect('reservations.db')
     c = conn.cursor()
-    # 관련된 모든 개별 예약 삭제
-    c.execute("DELETE FROM reservations WHERE repeat_group_id = ?", (group_id,))
+    
+    # reservation_ids에서 ID 목록 가져오기
+    c.execute("SELECT reservation_ids FROM repeat_groups WHERE id = ?", (group_id,))
+    result = c.fetchone()
+    
+    if result and result[0]:
+        reservation_ids = json.loads(result[0])
+        # 관련된 모든 개별 예약 삭제
+        for res_id in reservation_ids:
+            c.execute("DELETE FROM reservations WHERE id = ?", (res_id,))
+    
     # 그룹 삭제
     c.execute("DELETE FROM repeat_groups WHERE id = ?", (group_id,))
     conn.commit()
@@ -238,19 +323,19 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
     c.execute('''
         INSERT INTO repeat_groups 
         (selected_days, repeat_start_date, repeat_end_date, start_time, end_time, 
-         duration_minutes, total_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+         duration_minutes)
+        VALUES (?, ?, ?, ?, ?, ?)
     ''', (
         json.dumps(selected_days),
         str(repeat_start_date),
         str(repeat_end_date),
         str(start_time),
         str(end_time),
-        duration_minutes,
-        len(dates)
+        duration_minutes
     ))
     
     group_id = c.lastrowid
+    reservation_ids = []
     
     # 각 날짜별로 개별 예약 생성
     for date in dates:
@@ -262,18 +347,22 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
             
         c.execute('''
             INSERT INTO reservations 
-            (reservation_type, start_date, start_time, end_date, end_time, 
-             duration_minutes, repeat_group_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (start_date, start_time, end_date, end_time, duration_minutes)
+            VALUES (?, ?, ?, ?, ?)
         ''', (
-            "매주반복",
             str(date),
             str(start_time),
             str(actual_end_date),
             str(end_time),
-            duration_minutes,
-            group_id
+            duration_minutes
         ))
+        reservation_ids.append(c.lastrowid)
+    
+    # reservation_ids를 그룹에 저장
+    c.execute(
+        "UPDATE repeat_groups SET reservation_ids = ? WHERE id = ?",
+        (json.dumps(reservation_ids), group_id)
+    )
     
     conn.commit()
     conn.close()
@@ -283,7 +372,8 @@ def save_repeat_group(selected_days, repeat_start_date, repeat_end_date,
 st.set_page_config(
     page_title="촬영 예약 시스템",
     page_icon="🎬",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 # 다이얼로그 중앙 정렬 CSS
@@ -858,13 +948,20 @@ if has_data:
                 hours = duration_mins // 60
                 minutes = duration_mins % 60
                 
+                # reservation_ids에서 개수 계산
+                try:
+                    reservation_ids = json.loads(row['reservation_ids']) if row['reservation_ids'] else []
+                    total_count = len(reservation_ids)
+                except:
+                    total_count = 0
+                
                 st.info(f"""
                 **[매주반복]** 그룹 ID: {row['id']}  
                 🔄 **반복 요일:** {days_str}  
                 📅 **반복 기간:** {row['repeat_start_date']} ~ {row['repeat_end_date']}  
                 ⏰ **촬영 시간:** {row['start_time']} ~ {row['end_time']}  
                 ⏱️ **1회 시간:** {hours}시간 {minutes}분  
-                📊 **총 {row['total_count']}회 예약**  
+                📊 **총 {total_count}회 예약**  
                 📅 **등록:** {row['created_at']}
                 """)
                 
@@ -872,12 +969,16 @@ if has_data:
                 # expander 상태 관리
                 is_expanded = (st.session_state.expanded_group_id == row['id'])
                 
-                with st.expander(f"📋 개별 예약 {row['total_count']}건 상세보기", expanded=is_expanded):
+                with st.expander(f"📋 개별 예약 {total_count}건 상세보기", expanded=is_expanded):
                     # expander가 열리면 세션에 저장
                     if not is_expanded:
                         st.session_state.expanded_group_id = row['id']
                     
-                    individual_reservations = get_reservations_by_group(row['id'])
+                    try:
+                        individual_reservations = get_reservations_by_group(row['id'])
+                    except Exception as e:
+                        st.error(f"❌ 데이터베이스 조회 중 오류 발생: {str(e)}")
+                        individual_reservations = pd.DataFrame()
                     
                     if not individual_reservations.empty:
                         # 체크박스 선택을 위한 키 초기화
@@ -986,19 +1087,19 @@ if has_data:
                             with col_ind_del:
                                 if st.button("🗑️", key=f"delete_ind_{res['id']}", help="이 예약만 삭제", use_container_width=True):
                                     @st.dialog("삭제 확인")
-                                    def confirm_ind_dialog(reservation_id, check_key):
+                                    def confirm_ind_dialog(reservation_id, group_id, check_key):
                                         st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
                                         col1, col2 = st.columns(2)
                                         with col1:
                                             if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_ind_yes"):
-                                                delete_individual_reservation(reservation_id, row['id'])
+                                                delete_individual_reservation(reservation_id, group_id)
                                                 if check_key in st.session_state:
                                                     del st.session_state[check_key]
                                                 st.rerun()
                                         with col2:
                                             if st.button("❌ 취소", use_container_width=True, key="conf_ind_no"):
                                                 st.rerun()
-                                    confirm_ind_dialog(res['id'], f"check_ind_{res_id}_{row['id']}")
+                                    confirm_ind_dialog(res['id'], row['id'], f"check_ind_{res_id}_{row['id']}")
                             
                             st.markdown("---")
                     else:
@@ -1012,18 +1113,26 @@ if has_data:
             with col_delete:
                 if st.button("🗑️ 삭제", key=f"delete_group_{row['id']}", use_container_width=True):
                     @st.dialog("삭제 확인")
-                    def confirm_group_dialog(group_id, total_count):
-                        st.warning(f"⚠️ 반복예약 그룹 ({total_count}개 예약)을 삭제하시겠습니까?")
+                    def confirm_group_dialog(group_id, reservation_ids_json):
+                        try:
+                            reservation_ids = json.loads(reservation_ids_json) if reservation_ids_json else []
+                            count = len(reservation_ids)
+                        except:
+                            count = 0
+                        st.warning(f"⚠️ 반복예약 그룹 ({count}개 예약)을 삭제하시겠습니까?")
                         col1, col2 = st.columns(2)
                         with col1:
                             if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_grp_yes"):
                                 delete_repeat_group(group_id)
                                 st.session_state.editing_group_id = None
+                                # expanded_group_id도 초기화
+                                if 'expanded_group_id' in st.session_state:
+                                    st.session_state.expanded_group_id = None
                                 st.rerun()
                         with col2:
                             if st.button("❌ 취소", use_container_width=True, key="conf_grp_no"):
                                 st.rerun()
-                    confirm_group_dialog(row['id'], row['total_count'])
+                    confirm_group_dialog(row['id'], row['reservation_ids'])
             
             # 수정 모드
             if st.session_state.editing_group_id == row['id']:
@@ -1263,6 +1372,41 @@ else:
     st.info("등록된 예약 내역이 없습니다.")
 
 # 푸터
+st.markdown("---")
+
+# 데이터베이스 조회 버튼
+st.header("🧪 개발 도구")
+if st.button("📊 데이터베이스 조회", help="전체 데이터베이스 내용을 터미널에 출력합니다", use_container_width=True):
+    print("\n" + "="*80)
+    print("📊 데이터베이스 전체 조회 (reservations.db)")
+    print("="*80)
+    
+    conn = sqlite3.connect('reservations.db')
+    
+    # 예약 테이블
+    print("\n[reservations 테이블]")
+    df_reservations = pd.read_sql_query("SELECT * FROM reservations ORDER BY id DESC LIMIT 30", conn)
+    if not df_reservations.empty:
+        print(df_reservations.to_string(index=False))
+    else:
+        print("데이터 없음")
+    
+    # 반복예약 그룹 테이블
+    print("\n[repeat_groups 테이블]")
+    df_groups = pd.read_sql_query("SELECT * FROM repeat_groups ORDER BY id DESC LIMIT 20", conn)
+    if not df_groups.empty:
+        print(df_groups.to_string(index=False))
+    else:
+        print("데이터 없음")
+    
+    conn.close()
+    
+    print("\n" + "="*80)
+    print("✅ 데이터베이스 조회 완료")
+    print("="*80 + "\n")
+    
+    st.success("✅ 데이터베이스 내용이 터미널에 출력되었습니다!")
+
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray;'>
