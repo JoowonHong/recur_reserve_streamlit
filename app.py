@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, time
 import sqlite3
 import json
 from reservation_handler import handle_reservation_confirm
-#맥에서 수정 
+
 # 삭제 확인 다이얼로그
 @st.dialog("삭제 확인")
 def confirm_delete_dialog(message, on_confirm, **kwargs):

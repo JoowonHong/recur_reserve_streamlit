@@ -7,9 +7,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
 
-#맥에서수정
-
-# 페이지 설정 #
+# 페이지 설정
 st.set_page_config(
     page_title="스케줄 예약 시스템",
     page_icon="📅",
