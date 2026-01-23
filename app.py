@@ -19,6 +19,8 @@ def confirm_delete_dialog(message, on_confirm, **kwargs):
             st.rerun()
 
 # 데이터베이스 초기화
+# 이건 윈도우에서 수정
+# 브런치에서2번 수정
 def init_db():
     conn = sqlite3.connect('reservations.db')
     c = conn.cursor()
