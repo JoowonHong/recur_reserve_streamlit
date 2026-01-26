@@ -6,6 +6,7 @@ import json
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit
+from API_function import PixellotAPI
 
 #맥에서 수정이야 이건 브런치야
 
@@ -120,6 +121,32 @@ def delete_scheduled_reservation(schedule_id):
     c = conn.cursor()
     # 스케줄만 삭제하고 생성된 예약은 유지
     c.execute("DELETE FROM scheduled_reservations WHERE id = ?", (schedule_id,))
+    conn.commit()
+    conn.close()
+
+# 스케줄 예약 수정
+def update_scheduled_reservation(schedule_id, schedule_name, selected_days, schedule_start_date, schedule_end_date,
+                                 reservation_start_time, reservation_end_time, duration_minutes):
+    conn = sqlite3.connect('schedule_reservations.db')
+    c = conn.cursor()
+    c.execute(
+        '''
+        UPDATE scheduled_reservations
+        SET schedule_name = ?, selected_days = ?, schedule_start_date = ?, schedule_end_date = ?,
+            reservation_start_time = ?, reservation_end_time = ?, duration_minutes = ?
+        WHERE id = ?
+        ''',
+        (
+            schedule_name,
+            json.dumps(selected_days),
+            str(schedule_start_date),
+            str(schedule_end_date),
+            str(reservation_start_time),
+            str(reservation_end_time),
+            duration_minutes,
+            schedule_id
+        )
+    )
     conn.commit()
     conn.close()
 
@@ -250,6 +277,8 @@ st.markdown("---")
 # 세션 상태 초기화
 if 'editing_reservation_id' not in st.session_state:
     st.session_state.editing_reservation_id = None
+if 'editing_schedule_id' not in st.session_state:
+    st.session_state.editing_schedule_id = None
 
 st.info("""
 **🤖 스케줄 예약 시스템**
@@ -263,6 +292,17 @@ st.markdown("---")
 
 # 스케줄 예약 생성 섹션
 st.header("📝 스케줄 예약 생성")
+
+# 초기값 설정 (session_state에 없으면)
+current_time = datetime.now().time()
+if 'res_start_time' not in st.session_state:
+    st.session_state.res_start_time = current_time
+if 'res_end_time' not in st.session_state:
+    current_datetime = datetime.combine(datetime.now().date(), current_time)
+    end_datetime = current_datetime + timedelta(hours=3)
+    st.session_state.res_end_time = end_datetime.time()
+
+# 프로토타입: 시간 입력은 폼 내부에서 직접 설정 (자동 +3시간 없이 수동 조정)
 
 with st.form("schedule_form"):
     # 요일 선택
@@ -303,44 +343,32 @@ with st.form("schedule_form"):
             key="schedule_end_date",
             label_visibility="collapsed"
         )
-    
-    # 예약 시간 설정
-    st.markdown("**⏰ 생성될 예약의 촬영 시간**")
+
+    # 예약 시간 설정 (폼 내부 입력)
+    st.markdown("**⏰ 예약 시간 설정**")
     col_time1, col_time_sep, col_time2 = st.columns([1, 0.2, 1])
-    
-    current_time = datetime.now().time()
-    
-    # 시작 시간 + 3시간 계산
-    current_datetime = datetime.combine(datetime.now().date(), current_time)
-    end_datetime = current_datetime + timedelta(hours=3)
-    default_end_time = end_datetime.time()
     
     with col_time1:
         reservation_start_time = st.time_input(
             "시작 시간",
-            value=current_time,
+            value=st.session_state.res_start_time,
             key="res_start_time",
-            label_visibility="collapsed",
-            step=60
+            step=60,
+            label_visibility="collapsed"
         )
     
     with col_time_sep:
         st.markdown("<h4 style='text-align: center; padding-top: 8px;'>~</h4>", unsafe_allow_html=True)
     
-    # 시작 시간 변경 시 종료 시간 자동 계산
-    start_datetime = datetime.combine(datetime.now().date(), reservation_start_time)
-    auto_end_datetime = start_datetime + timedelta(hours=3)
-    auto_end_time = auto_end_datetime.time()
-    
     with col_time2:
         reservation_end_time = st.time_input(
             "종료 시간",
-            value=auto_end_time,
+            value=st.session_state.res_end_time,
             key="res_end_time",
-            label_visibility="collapsed",
-            step=60
+            step=60,
+            label_visibility="collapsed"
         )
-    
+
     # 시간 계산
     temp_start = datetime.combine(datetime.now().date(), reservation_start_time)
     temp_end = datetime.combine(datetime.now().date(), reservation_end_time)
@@ -427,9 +455,139 @@ if not schedules_df.empty:
         
         with col_delete:
             if st.button("🗑️ 삭제", key=f"del_schedule_{row['id']}", use_container_width=True):
-                delete_scheduled_reservation(row['id'])
-                st.success("스케줄이 삭제되었습니다.")
+                @st.dialog("삭제 확인")
+                def confirm_delete_schedule(schedule_id):
+                    st.warning("⚠️ 이 스케줄을 삭제하시겠습니까? (이미 생성된 예약은 유지됩니다)")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_sched_yes_{schedule_id}"):
+                            delete_scheduled_reservation(schedule_id)
+                            st.success("스케줄이 삭제되었습니다.")
+                            st.rerun()
+                    with col2:
+                        if st.button("❌ 취소", use_container_width=True, key=f"conf_sched_no_{schedule_id}"):
+                            st.rerun()
+                confirm_delete_schedule(row['id'])
+
+            # 삭제 버튼 바로 아래에 수정 버튼 배치
+            if st.button("✏️ 수정", key=f"edit_schedule_{row['id']}", use_container_width=True):
+                st.session_state.editing_schedule_id = row['id']
                 st.rerun()
+
+        # 수정 폼
+        if st.session_state.editing_schedule_id == row['id']:
+            with st.expander("✏️ 스케줄 수정", expanded=True, key=f"schedule_edit_{row['id']}"):
+                # 기존 값 파싱
+                try:
+                    edit_days = json.loads(row['selected_days'])
+                except:
+                    edit_days = []
+                try:
+                    edit_start_date = datetime.strptime(row['schedule_start_date'], '%Y-%m-%d').date()
+                except:
+                    edit_start_date = datetime.now().date()
+                try:
+                    edit_end_date = datetime.strptime(row['schedule_end_date'], '%Y-%m-%d').date()
+                except:
+                    edit_end_date = datetime.now().date()
+                try:
+                    edit_start_time = datetime.strptime(row['reservation_start_time'], '%H:%M:%S').time()
+                except:
+                    try:
+                        edit_start_time = datetime.strptime(row['reservation_start_time'], '%H:%M').time()
+                    except:
+                        edit_start_time = datetime.now().time()
+                try:
+                    edit_end_time = datetime.strptime(row['reservation_end_time'], '%H:%M:%S').time()
+                except:
+                    try:
+                        edit_end_time = datetime.strptime(row['reservation_end_time'], '%H:%M').time()
+                    except:
+                        edit_end_time = datetime.now().time()
+
+                # 반복 요일 선택
+                st.markdown("**📅 반복 요일**")
+                days_of_week = ["월", "화", "수", "목", "금", "토", "일"]
+                cols_edit_days = st.columns(7)
+                new_days = []
+                for i, day in enumerate(days_of_week):
+                    with cols_edit_days[i]:
+                        if st.checkbox(day, value=day in edit_days, key=f"edit_day_{row['id']}_{day}"):
+                            new_days.append(day)
+
+                # 스케줄 기간
+                st.markdown("**📆 스케줄 기간**")
+                col_ed1, col_ed_sep, col_ed2 = st.columns([1, 0.2, 1])
+                with col_ed1:
+                    new_start_date = st.date_input(
+                        "시작 날짜",
+                        value=edit_start_date,
+                        key=f"edit_schedule_start_{row['id']}"
+                    )
+                with col_ed_sep:
+                    st.markdown("<h4 style='text-align: center; padding-top: 8px;'>~</h4>", unsafe_allow_html=True)
+                with col_ed2:
+                    new_end_date = st.date_input(
+                        "종료 날짜",
+                        value=edit_end_date,
+                        min_value=new_start_date,
+                        key=f"edit_schedule_end_{row['id']}"
+                    )
+
+                # 예약 시간
+                st.markdown("**⏰ 예약 시간**")
+                col_et1, col_et_sep, col_et2 = st.columns([1, 0.2, 1])
+                with col_et1:
+                    new_start_time = st.time_input(
+                        "시작 시간",
+                        value=edit_start_time,
+                        key=f"edit_res_start_{row['id']}",
+                        step=60
+                    )
+                with col_et_sep:
+                    st.markdown("<h4 style='text-align: center; padding-top: 8px;'>~</h4>", unsafe_allow_html=True)
+                with col_et2:
+                    new_end_time = st.time_input(
+                        "종료 시간",
+                        value=edit_end_time,
+                        key=f"edit_res_end_{row['id']}",
+                        step=60
+                    )
+
+                # 시간 차이 계산
+                temp_start = datetime.combine(datetime.now().date(), new_start_time)
+                temp_end = datetime.combine(datetime.now().date(), new_end_time)
+                if new_end_time < new_start_time:
+                    temp_end = datetime.combine(datetime.now().date() + timedelta(days=1), new_end_time)
+                duration = temp_end - temp_start
+                duration_minutes = int(duration.total_seconds() / 60)
+
+                col_save, col_cancel = st.columns(2)
+                with col_save:
+                    if st.button("💾 저장", key=f"save_schedule_{row['id']}", use_container_width=True, type="primary"):
+                        if not new_days:
+                            st.error("⚠️ 반복 요일을 하나 이상 선택해주세요.")
+                        elif duration_minutes <= 0:
+                            st.error("⚠️ 종료 시간이 시작 시간보다 늦어야 합니다.")
+                        else:
+                            schedule_name = f"{', '.join(new_days)} {new_start_time.strftime('%H:%M')}-{new_end_time.strftime('%H:%M')}"
+                            update_scheduled_reservation(
+                                schedule_id=row['id'],
+                                schedule_name=schedule_name,
+                                selected_days=new_days,
+                                schedule_start_date=new_start_date,
+                                schedule_end_date=new_end_date,
+                                reservation_start_time=new_start_time,
+                                reservation_end_time=new_end_time,
+                                duration_minutes=duration_minutes
+                            )
+                            st.session_state.editing_schedule_id = None
+                            st.success("✅ 스케줄이 수정되었습니다.")
+                            st.rerun()
+                with col_cancel:
+                    if st.button("❌ 취소", key=f"cancel_schedule_{row['id']}", use_container_width=True):
+                        st.session_state.editing_schedule_id = None
+                        st.rerun()
         
         st.markdown("---")
 else:
@@ -487,18 +645,18 @@ if not reservations_df.empty:
                     st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_res_yes"):
+                        if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_res_yes_{reservation_id}"):
                             delete_reservation(reservation_id)
                             st.session_state.editing_reservation_id = None
                             st.rerun()
                     with col2:
-                        if st.button("❌ 취소", use_container_width=True, key="conf_res_no"):
+                        if st.button("❌ 취소", use_container_width=True, key=f"conf_res_no_{reservation_id}"):
                             st.rerun()
                 confirm_delete_dialog(res['id'])
         
         # 수정 모드
         if st.session_state.editing_reservation_id == res['id']:
-            with st.expander("✏️ 예약 수정", expanded=True):
+            with st.expander("✏️ 예약 수정", expanded=True, key=f"reservation_edit_schedule_{res['id']}"):
                 # 기존 값 파싱
                 try:
                     edit_start_date = datetime.strptime(res['start_date'], '%Y-%m-%d').date()

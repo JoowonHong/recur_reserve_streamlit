@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, time
 import sqlite3
 import json
 from reservation_handler import handle_reservation_confirm
+from API_function import PixellotAPI    
 
 # 삭제 확인 다이얼로그
 @st.dialog("삭제 확인")
@@ -670,6 +671,12 @@ with col1_2:
     st.session_state.start_time = start_time
 # 시작 시간 + 3시간 계산
 default_end_date, default_end_time = calculate_end_datetime(start_date, start_time, 3)
+
+# 초기 진입 시 종료 시간이 비어있다면 시작 시간 기준 +3시간으로 설정
+if st.session_state.end_time is None:
+    st.session_state.end_time = default_end_time
+    st.session_state.end_date = default_end_date
+
 with col_separator:
     st.markdown("<div style='display: flex; align-items: center; justify-content: center; height: 100%;'><h3 style='text-align: center; margin: 0; padding-top: 12px;'>~</h3></div>", unsafe_allow_html=True)
 with col1_3:
@@ -971,7 +978,7 @@ if has_data:
                 # expander 상태 관리
                 is_expanded = (st.session_state.expanded_group_id == row['id'])
                 
-                with st.expander(f"📋 개별 예약 {total_count}건 상세보기", expanded=is_expanded):
+                with st.expander(f"📋 [ID:{row['id']}] 개별 예약 {total_count}건 상세보기", expanded=is_expanded):
                     # expander가 열리면 세션에 저장
                     if not is_expanded:
                         st.session_state.expanded_group_id = row['id']
@@ -1024,7 +1031,7 @@ if has_data:
                                     st.warning(f"⚠️ {count}개의 예약을 삭제하시겠습니까?")
                                     col1, col2 = st.columns(2)
                                     with col1:
-                                        if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_sel_yes"):
+                                        if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_sel_yes_{group_id}"):
                                             # 선택된 예약들 삭제
                                             for res_id in ids:
                                                 delete_individual_reservation(res_id, group_id)
@@ -1038,7 +1045,7 @@ if has_data:
                                                 st.session_state.expanded_group_id = None
                                             st.rerun()
                                     with col2:
-                                        if st.button("❌ 취소", use_container_width=True, key="conf_sel_no"):
+                                        if st.button("❌ 취소", use_container_width=True, key=f"conf_sel_no_{group_id}"):
                                             st.rerun()
                                 confirm_dialog(selected_count, selected_ids, row['id'])
                         
@@ -1093,13 +1100,13 @@ if has_data:
                                         st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
                                         col1, col2 = st.columns(2)
                                         with col1:
-                                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_ind_yes"):
+                                            if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_ind_yes_{reservation_id}"):
                                                 delete_individual_reservation(reservation_id, group_id)
                                                 if check_key in st.session_state:
                                                     del st.session_state[check_key]
                                                 st.rerun()
                                         with col2:
-                                            if st.button("❌ 취소", use_container_width=True, key="conf_ind_no"):
+                                            if st.button("❌ 취소", use_container_width=True, key=f"conf_ind_no_{reservation_id}"):
                                                 st.rerun()
                                     confirm_ind_dialog(res['id'], row['id'], f"check_ind_{res_id}_{row['id']}")
                             
@@ -1124,7 +1131,7 @@ if has_data:
                         st.warning(f"⚠️ 반복예약 그룹 ({count}개 예약)을 삭제하시겠습니까?")
                         col1, col2 = st.columns(2)
                         with col1:
-                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_grp_yes"):
+                            if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_grp_yes_{group_id}"):
                                 delete_repeat_group(group_id)
                                 st.session_state.editing_group_id = None
                                 # expanded_group_id도 초기화
@@ -1132,13 +1139,13 @@ if has_data:
                                     st.session_state.expanded_group_id = None
                                 st.rerun()
                         with col2:
-                            if st.button("❌ 취소", use_container_width=True, key="conf_grp_no"):
+                            if st.button("❌ 취소", use_container_width=True, key=f"conf_grp_no_{group_id}"):
                                 st.rerun()
                     confirm_group_dialog(row['id'], row['reservation_ids'])
             
             # 수정 모드
             if st.session_state.editing_group_id == row['id']:
-                with st.expander("✏️ 반복예약 시간 수정", expanded=True):
+                with st.expander("✏️ 반복예약 시간 수정", expanded=True, key=f"repeat_edit_{row['id']}"):
                     st.markdown("**🔄 반복 요일 및 기간은 수정할 수 없습니다. 시간만 변경 가능합니다.**")
                     
                     # 기존 시간 파싱
@@ -1255,18 +1262,18 @@ if has_data:
                         st.warning("⚠️ 이 예약을 삭제하시겠습니까?")
                         col1, col2 = st.columns(2)
                         with col1:
-                            if st.button("✅ 확인", use_container_width=True, type="primary", key="conf_res_yes"):
+                            if st.button("✅ 확인", use_container_width=True, type="primary", key=f"conf_res_yes_{reservation_id}"):
                                 delete_reservation(reservation_id)
                                 st.session_state.editing_reservation_id = None
                                 st.rerun()
                         with col2:
-                            if st.button("❌ 취소", use_container_width=True, key="conf_res_no"):
+                            if st.button("❌ 취소", use_container_width=True, key=f"conf_res_no_{reservation_id}"):
                                 st.rerun()
                     confirm_res_dialog(row['id'])
             
             # 수정 모드
             if st.session_state.editing_reservation_id == row['id']:
-                with st.expander("✏️ 예약 수정", expanded=True):
+                with st.expander("✏️ 예약 수정", expanded=True, key=f"reservation_edit_app_{row['id']}"):
                     # 기존 데이터 파싱
                     try:
                         edit_start_date = datetime.strptime(row['start_date'], '%Y-%m-%d').date()
@@ -1408,6 +1415,21 @@ if st.button("📊 데이터베이스 조회", help="전체 데이터베이스 �
     print("="*80 + "\n")
     
     st.success("✅ 데이터베이스 내용이 터미널에 출력되었습니다!")
+
+
+if st.button("Get API DATA", help="API 데이터를 가져옵니다  ", use_container_width=True):
+    print("\n" + "="*80)
+    # print("📊 데이터베이스 전체 조회 (reservations.db)")
+    print("="*80)
+    api = PixellotAPI(isReal=False)
+   
+    
+    print("\n" + "="*80)
+    print("✅ 데이터베이스 조회 완료")
+    print("API USERNAME:", api.username)
+    print("="*80 + "\n")
+    
+    st.success("✅ API 데이터가 터미널에 출력되었습니다!")    
 
 st.markdown("---")
 st.markdown("""
