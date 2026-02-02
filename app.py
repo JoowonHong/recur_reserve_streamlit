@@ -1145,7 +1145,7 @@ if has_data:
             
             # 수정 모드
             if st.session_state.editing_group_id == row['id']:
-                with st.expander("✏️ 반복예약 시간 수정", expanded=True, key=f"repeat_edit_{row['id']}"):
+                with st.expander("✏️ 반복예약 시간 수정", expanded=True):
                     st.markdown("**🔄 반복 요일 및 기간은 수정할 수 없습니다. 시간만 변경 가능합니다.**")
                     
                     # 기존 시간 파싱
@@ -1273,7 +1273,7 @@ if has_data:
             
             # 수정 모드
             if st.session_state.editing_reservation_id == row['id']:
-                with st.expander("✏️ 예약 수정", expanded=True, key=f"reservation_edit_app_{row['id']}"):
+                with st.expander("✏️ 예약 수정", expanded=True):
                     # 기존 데이터 파싱
                     try:
                         edit_start_date = datetime.strptime(row['start_date'], '%Y-%m-%d').date()

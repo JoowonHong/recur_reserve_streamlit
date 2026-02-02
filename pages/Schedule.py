@@ -476,7 +476,7 @@ if not schedules_df.empty:
 
         # 수정 폼
         if st.session_state.editing_schedule_id == row['id']:
-            with st.expander("✏️ 스케줄 수정", expanded=True, key=f"schedule_edit_{row['id']}"):
+            with st.expander("✏️ 스케줄 수정", expanded=True):
                 # 기존 값 파싱
                 try:
                     edit_days = json.loads(row['selected_days'])
@@ -656,7 +656,7 @@ if not reservations_df.empty:
         
         # 수정 모드
         if st.session_state.editing_reservation_id == res['id']:
-            with st.expander("✏️ 예약 수정", expanded=True, key=f"reservation_edit_schedule_{res['id']}"):
+            with st.expander("✏️ 예약 수정", expanded=True):
                 # 기존 값 파싱
                 try:
                     edit_start_date = datetime.strptime(res['start_date'], '%Y-%m-%d').date()
